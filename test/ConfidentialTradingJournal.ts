@@ -1,8 +1,15 @@
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import { ethers, fhevm } from "hardhat";
 import { ConfidentialTradingJournal, ConfidentialTradingJournal__factory } from "../types";
-import { expect } from "chai";
+import chai, { expect } from "chai";
+import chaiAsPromised from "chai-as-promised";
 import { FhevmType } from "@fhevm/hardhat-plugin";
+
+// fhevm.userDecryptEuint() runs the mock relayer's decrypt check off-chain — an
+// unauthorized request rejects with a plain JS Error, not an EVM revert, so
+// hardhat-chai-matchers' `.reverted` can't assert on it. `.rejected` (from
+// chai-as-promised) asserts the promise rejects, regardless of reason shape.
+chai.use(chaiAsPromised);
 
 type Signers = {
   deployer: HardhatEthersSigner;
@@ -87,7 +94,7 @@ describe("ConfidentialTradingJournal", function () {
     // Carol was never granted access — her user-decrypt attempt must fail.
     await expect(
       fhevm.userDecryptEuint(FhevmType.euint64, encGains, journalAddress, signers.carol),
-    ).to.be.reverted;
+    ).to.be.rejected;
   });
 
   it("lets a trader grant a verifier access to aggregates only", async function () {
@@ -108,6 +115,6 @@ describe("ConfidentialTradingJournal", function () {
     const [encTradePnl] = await journal.getTrade(signers.alice.address, 0);
     await expect(
       fhevm.userDecryptEuint(FhevmType.euint64, encTradePnl, journalAddress, signers.bob),
-    ).to.be.reverted;
+    ).to.be.rejected;
   });
 });
