@@ -3,11 +3,16 @@ import { Contract, type Signer } from "ethers";
 import { CONTRACT_ADDRESS, JOURNAL_ABI } from "./contract";
 import { connectWallet, encryptTrade, userDecryptHandles } from "./fhevm";
 
-type Notification = {
+const ETHERSCAN_TX_BASE = "https://sepolia.etherscan.io/tx/";
+
+export type Notification = {
   id: string;
   title: string;
   detail?: string;
   ts: number;
+  txHash?: string; // if set, shows a "View on Etherscan" link
+  navigateTo?: "/dashboard" | "/reveal"; // if set, the row itself is a link
+  highlight?: string; // carried along as the ?highlight= search param
 };
 
 export type Entry = {
@@ -41,6 +46,12 @@ export type Reveal = {
   grantedAt: number;
 };
 
+export type LookupResult =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "denied" }
+  | { status: "granted"; gains: bigint; losses: bigint; winCount: bigint; lossCount: bigint };
+
 type State = {
   address: string | null;
   signer: Signer | null;
@@ -55,6 +66,7 @@ type State = {
   decryptingAggregates: boolean;
 
   reveals: Reveal[];
+  lookup: LookupResult;
 
   notifications: Notification[];
 };
@@ -70,6 +82,7 @@ const initialState: State = {
   aggregates: {},
   decryptingAggregates: false,
   reveals: [],
+  lookup: { status: "idle" },
   notifications: [],
 };
 
@@ -80,9 +93,9 @@ function setState(patch: Partial<State>) {
   state = { ...state, ...patch };
   emit();
 }
-function pushNotification(title: string, detail?: string) {
+function pushNotification(n: Omit<Notification, "id" | "ts">) {
   setState({
-    notifications: [{ id: crypto.randomUUID(), title, detail, ts: Date.now() }, ...state.notifications],
+    notifications: [{ id: crypto.randomUUID(), ts: Date.now(), ...n }, ...state.notifications],
   });
 }
 
@@ -120,6 +133,34 @@ function getContract(runner: Signer) {
   return new Contract(CONTRACT_ADDRESS, JOURNAL_ABI, runner);
 }
 
+// --- MetaMask account/chain change wiring ---
+// Without this, switching the active account in MetaMask never reaches the
+// app: ethers only reads the signer once at connect time, so the store kept
+// pointing at whichever account was active when you clicked "Connect".
+
+let ethListenersRegistered = false;
+
+function registerEthereumListeners() {
+  if (ethListenersRegistered) return;
+  const eth = (window as any).ethereum;
+  if (!eth?.on) return;
+  ethListenersRegistered = true;
+
+  eth.on("accountsChanged", (accounts: string[]) => {
+    if (accounts.length === 0) {
+      walletStore.disconnect();
+      return;
+    }
+    const next = accounts[0];
+    if (state.address && next.toLowerCase() === state.address.toLowerCase()) return;
+    void walletStore.syncActiveAccount();
+  });
+
+  eth.on("chainChanged", () => {
+    window.location.reload();
+  });
+}
+
 export const walletStore = {
   getState: () => state,
   subscribe: (l: () => void) => {
@@ -131,13 +172,53 @@ export const walletStore = {
     setState({ connecting: true, connectError: null });
     try {
       const { signer, address } = await connectWallet();
-      setState({ signer, address, reveals: readReveals(address) });
-      pushNotification("Wallet connected", "Sepolia network");
+      setState({ signer, address, reveals: readReveals(address), lookup: { status: "idle" } });
+      registerEthereumListeners();
+      pushNotification({ title: "Wallet connected", detail: "Sepolia network", navigateTo: "/dashboard" });
       await Promise.all([walletStore.refreshEntries(), walletStore.refreshAggregates()]);
     } catch (err: any) {
       setState({ connectError: err?.message ?? "Failed to connect wallet" });
     } finally {
       setState({ connecting: false });
+    }
+  },
+
+  /** Forces MetaMask's account picker back open, even if this site is
+   *  already authorized for a previously-selected account, then connects
+   *  to whichever account the user picks. */
+  async switchWallet() {
+    const eth = (window as any).ethereum;
+    if (!eth) {
+      setState({ connectError: "No injected wallet found. Install MetaMask to use this app." });
+      return;
+    }
+    try {
+      await eth.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
+    } catch {
+      // User dismissed the permissions dialog — fall through and just
+      // reconnect with whatever account is currently active.
+    }
+    await walletStore.connect();
+  },
+
+  /** Re-syncs local state to whichever account MetaMask says is active now,
+   *  called after an accountsChanged event (no new prompt needed). */
+  async syncActiveAccount() {
+    try {
+      const { signer, address } = await connectWallet();
+      if (state.address && address.toLowerCase() === state.address.toLowerCase()) return;
+      setState({
+        signer,
+        address,
+        entries: [],
+        aggregates: {},
+        lookup: { status: "idle" },
+        reveals: readReveals(address),
+      });
+      pushNotification({ title: "Switched wallet", detail: `${address.slice(0, 6)}…${address.slice(-4)}`, navigateTo: "/dashboard" });
+      await Promise.all([walletStore.refreshEntries(), walletStore.refreshAggregates()]);
+    } catch (err: any) {
+      pushNotification({ title: "Account switch failed", detail: err?.message ?? "Unknown error" });
     }
   },
 
@@ -199,11 +280,10 @@ export const walletStore = {
     const magnitude = BigInt(Math.abs(Math.trunc(amount)));
     const isWin = amount >= 0;
     if (magnitude === 0n) {
-      pushNotification("Enter a non-zero P&L", "Amount must not be zero");
+      pushNotification({ title: "Enter a non-zero P&L", detail: "Amount must not be zero" });
       return;
     }
     try {
-      pushNotification("Encrypting trade client-side…", label);
       const { encPnlMagnitude, encIsWin, inputProof } = await encryptTrade(CONTRACT_ADDRESS, address, magnitude, isWin);
       const contract = getContract(signer);
       const tx = await contract.submitTrade(encPnlMagnitude, encIsWin, inputProof);
@@ -214,12 +294,18 @@ export const walletStore = {
       meta[nextIndex] = { label, asset };
       writeMeta(address, meta);
 
-      pushNotification("Encrypted entry submitted", `${label} · tx ${tx.hash.slice(0, 10)}…`);
+      pushNotification({
+        title: "Encrypted entry submitted",
+        detail: label,
+        txHash: tx.hash,
+        navigateTo: "/dashboard",
+        highlight: `entry-${nextIndex}`,
+      });
       await walletStore.refreshEntries();
       await walletStore.refreshAggregates();
       await walletStore.reGrantTrackedReveals();
     } catch (err: any) {
-      pushNotification("Trade submission failed", err?.shortMessage ?? err?.message ?? "Unknown error");
+      pushNotification({ title: "Trade submission failed", detail: err?.shortMessage ?? err?.message ?? "Unknown error" });
     }
   },
 
@@ -242,7 +328,7 @@ export const walletStore = {
         })),
       });
     } catch (err: any) {
-      pushNotification("Decryption failed", err?.message ?? "Unknown error");
+      pushNotification({ title: "Decryption failed", detail: err?.message ?? "Unknown error" });
     } finally {
       setState({ decryptingEntries: false });
     }
@@ -269,7 +355,7 @@ export const walletStore = {
         },
       });
     } catch (err: any) {
-      pushNotification("Decryption failed", err?.message ?? "Unknown error");
+      pushNotification({ title: "Decryption failed", detail: err?.message ?? "Unknown error" });
     } finally {
       setState({ decryptingAggregates: false });
     }
@@ -288,9 +374,15 @@ export const walletStore = {
       ];
       setState({ reveals });
       writeReveals(address, reveals);
-      pushNotification("Reveal granted", `${addr.slice(0, 10)}… · tx ${tx.hash.slice(0, 10)}…`);
+      pushNotification({
+        title: "Reveal granted",
+        detail: `${addr.slice(0, 10)}…`,
+        txHash: tx.hash,
+        navigateTo: "/reveal",
+        highlight: `grant-${addr.toLowerCase()}`,
+      });
     } catch (err: any) {
-      pushNotification("Grant failed", err?.shortMessage ?? err?.message ?? "Unknown error");
+      pushNotification({ title: "Grant failed", detail: err?.shortMessage ?? err?.message ?? "Unknown error" });
     }
   },
 
@@ -311,10 +403,11 @@ export const walletStore = {
     const reveals = state.reveals.filter((r) => r.address !== addr);
     setState({ reveals });
     writeReveals(address, reveals);
-    pushNotification(
-      "Verifier removed from auto-refresh",
-      "Their access to already-granted aggregates lapses after your next trade.",
-    );
+    pushNotification({
+      title: "Verifier removed from auto-refresh",
+      detail: "Their access to already-granted aggregates lapses after your next trade.",
+      navigateTo: "/reveal",
+    });
   },
 
   async reGrantTrackedReveals() {
@@ -326,11 +419,45 @@ export const walletStore = {
         const tx = await contract.grantVerifierAccess(r.address);
         await tx.wait();
       } catch (err: any) {
-        pushNotification(
-          "Verifier re-grant failed",
-          `${r.address.slice(0, 10)}… — ${err?.shortMessage ?? err?.message ?? "unknown error"}`,
-        );
+        pushNotification({
+          title: "Verifier re-grant failed",
+          detail: `${r.address.slice(0, 10)}… — ${err?.shortMessage ?? err?.message ?? "unknown error"}`,
+          navigateTo: "/reveal",
+          highlight: `grant-${r.address.toLowerCase()}`,
+        });
       }
+    }
+  },
+
+  /** Looks up another trader's aggregates as a verifier: reads their (public)
+   *  ciphertext handles, then attempts to decrypt them with the connected
+   *  wallet. Succeeds only if that trader called grantVerifierAccess for us. */
+  async lookupTrader(traderAddress: string) {
+    const { signer } = state;
+    if (!signer) return;
+    setState({ lookup: { status: "loading" } });
+    try {
+      const contract = getContract(signer);
+      const [totalGainsHandle, totalLossesHandle, winCountHandle, lossCountHandle] = await contract.getAggregates(
+        traderAddress,
+      );
+      const result = await userDecryptHandles(CONTRACT_ADDRESS, signer, {
+        gains: totalGainsHandle,
+        losses: totalLossesHandle,
+        winCount: winCountHandle,
+        lossCount: lossCountHandle,
+      });
+      setState({
+        lookup: {
+          status: "granted",
+          gains: result.gains,
+          losses: result.losses,
+          winCount: result.winCount,
+          lossCount: result.lossCount,
+        },
+      });
+    } catch {
+      setState({ lookup: { status: "denied" } });
     }
   },
 
@@ -345,6 +472,10 @@ export function useWallet() {
 
 export function truncate(addr: string) {
   return `${addr.slice(0, 5)}…${addr.slice(-3)}`;
+}
+
+export function etherscanTxUrl(hash: string) {
+  return `${ETHERSCAN_TX_BASE}${hash}`;
 }
 
 export function timeAgo(ts: number) {

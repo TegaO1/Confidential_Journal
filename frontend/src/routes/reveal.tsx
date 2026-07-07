@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
-import { Eye, Lock, Trash2, UserCheck } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Eye, Lock, Search, ShieldCheck, ShieldX, Trash2, UserCheck } from "lucide-react";
 import { TopNav } from "@/components/top-nav";
 import { useWallet, walletStore } from "@/lib/wallet-store";
 
 export const Route = createFileRoute("/reveal")({
+  validateSearch: (search: Record<string, unknown>): { highlight?: string } =>
+    typeof search.highlight === "string" ? { highlight: search.highlight } : {},
   head: () => ({
     meta: [
       { title: "Selective Reveal — Confidential Trading Journal" },
@@ -15,9 +17,21 @@ export const Route = createFileRoute("/reveal")({
 });
 
 function Reveal() {
-  const { address, reveals, connecting } = useWallet();
+  const { address, reveals, connecting, lookup } = useWallet();
+  const { highlight } = Route.useSearch();
   const [addr, setAddr] = useState("");
   const [granting, setGranting] = useState(false);
+  const [lookupAddr, setLookupAddr] = useState("");
+  const [flashAddr, setFlashAddr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!highlight) return;
+    setFlashAddr(highlight);
+    const el = document.getElementById(highlight);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const t = setTimeout(() => setFlashAddr(null), 2500);
+    return () => clearTimeout(t);
+  }, [highlight, reveals.length]);
 
   async function grant(e: React.FormEvent) {
     e.preventDefault();
@@ -29,6 +43,12 @@ function Reveal() {
     } finally {
       setGranting(false);
     }
+  }
+
+  function lookupTrader(e: React.FormEvent) {
+    e.preventDefault();
+    if (!/^0x[a-fA-F0-9]{40}$/.test(lookupAddr)) return;
+    walletStore.lookupTrader(lookupAddr);
   }
 
   return (
@@ -102,7 +122,13 @@ function Reveal() {
               ) : (
                 <ul className="rounded-3xl bg-background border border-border/60 shadow-soft divide-y divide-border/60 overflow-hidden">
                   {reveals.map((r) => (
-                    <li key={r.address} className="flex items-center gap-4 px-6 py-4">
+                    <li
+                      key={r.address}
+                      id={`grant-${r.address.toLowerCase()}`}
+                      className={`flex items-center gap-4 px-6 py-4 transition ${
+                        flashAddr === `grant-${r.address.toLowerCase()}` ? "bg-primary/10 ring-1 ring-inset ring-primary/60" : ""
+                      }`}
+                    >
                       <div className="grid h-10 w-10 place-items-center rounded-2xl bg-surface">
                         <UserCheck className="h-4 w-4" />
                       </div>
@@ -124,6 +150,65 @@ function Reveal() {
                   ))}
                 </ul>
               )}
+            </section>
+
+            <section className="mt-12">
+              <div className="label-caps text-muted-foreground mb-4">Verify a trader</div>
+              <form onSubmit={lookupTrader} className="rounded-3xl bg-background border border-border/60 shadow-soft p-6 sm:p-8">
+                <div className="flex items-center gap-3 mb-5">
+                  <div className="grid h-10 w-10 place-items-center rounded-2xl bg-surface"><Search className="h-5 w-5" /></div>
+                  <div>
+                    <div className="text-sm font-semibold">Request another trader's aggregates</div>
+                    <div className="text-xs text-muted-foreground">
+                      Works from any connected wallet — succeeds only if that trader granted this wallet access
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input
+                    value={lookupAddr}
+                    onChange={(e) => setLookupAddr(e.target.value)}
+                    placeholder="0xTraderAddress…"
+                    className="flex-1 rounded-2xl bg-surface px-4 py-3.5 text-sm font-mono tabular-nums outline-none focus:ring-2 focus:ring-primary"
+                  />
+                  <button
+                    disabled={lookup.status === "loading"}
+                    className="rounded-2xl bg-surface px-6 py-3.5 text-sm font-semibold hover:bg-border/60 transition disabled:opacity-60"
+                  >
+                    {lookup.status === "loading" ? "Requesting…" : "Request aggregates"}
+                  </button>
+                </div>
+
+                {lookup.status === "denied" && (
+                  <div className="mt-5 flex items-center gap-2 rounded-2xl bg-destructive/10 text-destructive px-4 py-3 text-sm font-medium">
+                    <ShieldX className="h-4 w-4" /> Access denied — this trader hasn't granted your wallet access.
+                  </div>
+                )}
+
+                {lookup.status === "granted" && (
+                  <div className="mt-5">
+                    <div className="flex items-center gap-2 rounded-2xl bg-primary/15 text-foreground px-4 py-3 text-sm font-medium mb-3">
+                      <ShieldCheck className="h-4 w-4 text-primary" /> Access granted — decrypted live from Sepolia
+                    </div>
+                    <div className="grid grid-cols-3 gap-3 text-center">
+                      <div className="rounded-2xl bg-surface p-4">
+                        <div className="text-[11px] label-caps text-muted-foreground">Gains</div>
+                        <div className="text-xl font-bold tabular-nums mt-1">{lookup.gains.toString()}</div>
+                      </div>
+                      <div className="rounded-2xl bg-surface p-4">
+                        <div className="text-[11px] label-caps text-muted-foreground">Losses</div>
+                        <div className="text-xl font-bold tabular-nums mt-1">{lookup.losses.toString()}</div>
+                      </div>
+                      <div className="rounded-2xl bg-surface p-4">
+                        <div className="text-[11px] label-caps text-muted-foreground">Win / Loss</div>
+                        <div className="text-xl font-bold tabular-nums mt-1">
+                          {lookup.winCount.toString()} / {lookup.lossCount.toString()}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </form>
             </section>
           </>
         )}

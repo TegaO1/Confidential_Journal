@@ -1,10 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowUpRight, Lock, Plus, TrendingUp, TrendingDown, Percent, X, Unlock } from "lucide-react";
 import { TopNav } from "@/components/top-nav";
 import { timeAgo, useWallet, walletStore, type Entry } from "@/lib/wallet-store";
 
 export const Route = createFileRoute("/dashboard")({
+  validateSearch: (search: Record<string, unknown>): { highlight?: string } =>
+    typeof search.highlight === "string" ? { highlight: search.highlight } : {},
   head: () => ({
     meta: [
       { title: "Dashboard — Confidential Trading Journal" },
@@ -17,7 +19,18 @@ export const Route = createFileRoute("/dashboard")({
 function Dashboard() {
   const { address, entries, loadingEntries, decryptingEntries, aggregates, decryptingAggregates, connecting } =
     useWallet();
+  const { highlight } = Route.useSearch();
   const [open, setOpen] = useState(false);
+  const [flashIndex, setFlashIndex] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!highlight) return;
+    setFlashIndex(highlight);
+    const el = document.getElementById(highlight);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const t = setTimeout(() => setFlashIndex(null), 2500);
+    return () => clearTimeout(t);
+  }, [highlight, entries.length]);
 
   if (!address) {
     return (
@@ -119,7 +132,7 @@ function Dashboard() {
                 <li className="px-6 py-10 text-center text-sm text-muted-foreground">No trades logged yet.</li>
               )}
               {entries.map((e) => (
-                <EntryRow key={e.index} entry={e} />
+                <EntryRow key={e.index} entry={e} highlighted={flashIndex === `entry-${e.index}`} />
               ))}
             </ul>
           </div>
@@ -141,11 +154,16 @@ function Dashboard() {
   );
 }
 
-function EntryRow({ entry }: { entry: Entry }) {
+function EntryRow({ entry, highlighted }: { entry: Entry; highlighted?: boolean }) {
   const revealed = entry.decryptedPnl !== undefined;
   const isWin = entry.decryptedIsWin;
   return (
-    <li className="flex items-center gap-4 px-6 py-4 hover:bg-surface/70 transition">
+    <li
+      id={`entry-${entry.index}`}
+      className={`flex items-center gap-4 px-6 py-4 hover:bg-surface/70 transition ${
+        highlighted ? "bg-primary/10 ring-1 ring-inset ring-primary/60" : ""
+      }`}
+    >
       <div
         className={`grid h-10 w-10 place-items-center rounded-2xl ${
           revealed ? (isWin ? "bg-primary/25" : "bg-surface") : "bg-surface"

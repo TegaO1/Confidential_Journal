@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
-import { Bell, ChevronDown, LogOut, Menu, Shield, X } from "lucide-react";
-import { truncate, useWallet, walletStore, timeAgo } from "@/lib/wallet-store";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { Bell, ChevronDown, ExternalLink, LogOut, Menu, RefreshCw, Shield, X } from "lucide-react";
+import { truncate, useWallet, walletStore, timeAgo, etherscanTxUrl, type Notification } from "@/lib/wallet-store";
 
 export function TopNav() {
   const { address, notifications, connecting, connectError } = useWallet();
@@ -10,6 +10,7 @@ export function TopNav() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
   const walletRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     function onDoc(e: MouseEvent) {
@@ -19,6 +20,12 @@ export function TopNav() {
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
+
+  function handleNotifClick(n: Notification) {
+    if (!n.navigateTo) return;
+    navigate({ to: n.navigateTo, search: n.highlight ? ({ highlight: n.highlight } as any) : undefined });
+    setNotifOpen(false);
+  }
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur-xl">
@@ -69,15 +76,30 @@ export function TopNav() {
                       <li className="px-4 py-10 text-center text-sm text-muted-foreground">You're all caught up.</li>
                     )}
                     {notifications.map((n) => (
-                      <li key={n.id} className="rounded-2xl px-3 py-3 hover:bg-surface transition">
-                        <div className="flex items-start gap-3">
+                      <li key={n.id} className="rounded-2xl px-1 py-1 hover:bg-surface transition">
+                        <button
+                          type="button"
+                          onClick={() => handleNotifClick(n)}
+                          disabled={!n.navigateTo}
+                          className="flex items-start gap-3 w-full text-left px-2 py-2 rounded-xl disabled:cursor-default"
+                        >
                           <span className="mt-1.5 h-2 w-2 rounded-full bg-primary shrink-0" />
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-medium truncate">{n.title}</div>
                             {n.detail && <div className="text-xs text-muted-foreground truncate">{n.detail}</div>}
                             <div className="text-[11px] text-muted-foreground mt-1">{timeAgo(n.ts)}</div>
                           </div>
-                        </div>
+                        </button>
+                        {n.txHash && (
+                          <a
+                            href={etherscanTxUrl(n.txHash)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="ml-7 inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+                          >
+                            View on Etherscan <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -104,6 +126,12 @@ export function TopNav() {
                     <div className="text-sm font-medium tabular-nums mt-0.5">{truncate(address)}</div>
                     <div className="text-xs text-muted-foreground">Sepolia · Zama FHE</div>
                   </div>
+                  <button
+                    onClick={() => { walletStore.switchWallet(); setWalletMenu(false); }}
+                    className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm hover:bg-surface transition"
+                  >
+                    <RefreshCw className="h-4 w-4" /> Switch Wallet
+                  </button>
                   <button
                     onClick={() => { walletStore.disconnect(); setWalletMenu(false); }}
                     className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm text-destructive hover:bg-destructive/5 transition"
@@ -143,7 +171,14 @@ export function TopNav() {
             <MobileLink to="/" onClick={() => setMobileOpen(false)}>Home</MobileLink>
             <MobileLink to="/dashboard" onClick={() => setMobileOpen(false)}>Dashboard</MobileLink>
             <MobileLink to="/reveal" onClick={() => setMobileOpen(false)}>Selective Reveal</MobileLink>
-            {!address && (
+            {address ? (
+              <button
+                onClick={() => { walletStore.switchWallet(); setMobileOpen(false); }}
+                className="mt-4 rounded-2xl bg-surface px-4 py-3.5 text-sm font-semibold"
+              >
+                Switch Wallet
+              </button>
+            ) : (
               <button
                 onClick={() => { walletStore.connect(); setMobileOpen(false); }}
                 className="mt-4 rounded-2xl bg-primary text-black px-4 py-3.5 text-sm font-semibold"
