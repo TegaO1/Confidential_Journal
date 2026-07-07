@@ -15,14 +15,20 @@ export const Route = createFileRoute("/reveal")({
 });
 
 function Reveal() {
-  const { address, reveals } = useWallet();
+  const { address, reveals, connecting } = useWallet();
   const [addr, setAddr] = useState("");
+  const [granting, setGranting] = useState(false);
 
-  function grant(e: React.FormEvent) {
+  async function grant(e: React.FormEvent) {
     e.preventDefault();
-    if (!/^0x[a-fA-F0-9]{6,}/.test(addr)) return;
-    walletStore.grantReveal(addr);
-    setAddr("");
+    if (!/^0x[a-fA-F0-9]{40}$/.test(addr) || granting) return;
+    setGranting(true);
+    try {
+      await walletStore.grantReveal(addr);
+      setAddr("");
+    } finally {
+      setGranting(false);
+    }
   }
 
   return (
@@ -31,13 +37,23 @@ function Reveal() {
       <main className="mx-auto max-w-4xl px-5 sm:px-8 py-14">
         <div className="label-caps text-muted-foreground mb-2">Access</div>
         <h1 className="text-3xl sm:text-4xl font-bold tracking-[-0.02em]">Selective Reveal</h1>
-        <p className="text-sm text-muted-foreground mt-2 max-w-xl">Choose exactly who can decrypt your aggregate stats. Grants are on-chain and revocable at any time.</p>
+        <p className="text-sm text-muted-foreground mt-2 max-w-xl">
+          Choose exactly who can decrypt your aggregate stats. Each grant is an on-chain transaction
+          (<code>grantVerifierAccess</code>) — the verifier can only ever decrypt your four aggregate values,
+          never an individual trade.
+        </p>
 
         {!address && (
           <div className="mt-8 rounded-3xl bg-surface p-6 flex items-center gap-4">
             <Lock className="h-5 w-5" />
             <div className="text-sm">Connect your wallet to manage reveals.</div>
-            <button onClick={() => walletStore.connect()} className="ml-auto rounded-full bg-primary text-black px-4 py-2 text-sm font-semibold">Connect</button>
+            <button
+              onClick={() => walletStore.connect()}
+              disabled={connecting}
+              className="ml-auto rounded-full bg-primary text-black px-4 py-2 text-sm font-semibold disabled:opacity-60"
+            >
+              {connecting ? "Connecting…" : "Connect"}
+            </button>
           </div>
         )}
 
@@ -48,7 +64,7 @@ function Reveal() {
                 <div className="grid h-10 w-10 place-items-center rounded-2xl bg-primary/25"><UserCheck className="h-5 w-5" /></div>
                 <div>
                   <div className="text-sm font-semibold">Grant a verifier</div>
-                  <div className="text-xs text-muted-foreground">They'll receive a scoped decryption key</div>
+                  <div className="text-xs text-muted-foreground">They'll be able to decrypt your aggregates via the Zama relayer</div>
                 </div>
               </div>
               <div className="flex flex-col sm:flex-row gap-3">
@@ -58,9 +74,19 @@ function Reveal() {
                   placeholder="0xVerifierAddress…"
                   className="flex-1 rounded-2xl bg-surface px-4 py-3.5 text-sm font-mono tabular-nums outline-none focus:ring-2 focus:ring-primary"
                 />
-                <button className="rounded-2xl bg-primary text-black px-6 py-3.5 text-sm font-semibold hover:brightness-95 transition">Grant reveal</button>
+                <button disabled={granting} className="rounded-2xl bg-primary text-black px-6 py-3.5 text-sm font-semibold hover:brightness-95 transition disabled:opacity-60">
+                  {granting ? "Granting…" : "Grant reveal"}
+                </button>
               </div>
             </form>
+
+            <div className="mt-6 rounded-2xl bg-primary/10 px-5 py-4 text-xs text-muted-foreground leading-relaxed">
+              <strong className="text-foreground">Note on revocation:</strong> fhEVM permissions can't be un-granted
+              once given to a ciphertext. Logging a new trade produces fresh aggregate ciphertexts, and this app
+              automatically re-grants every verifier below marked "auto-refresh" so their access keeps working.
+              Removing a verifier here stops future re-grants — their access to your current aggregates lapses the
+              next time you log a trade, but not before.
+            </div>
 
             <section className="mt-10">
               <div className="flex items-center justify-between mb-4">
@@ -84,8 +110,14 @@ function Reveal() {
                         <div className="text-sm font-mono truncate">{r.address}</div>
                         <div className="text-xs text-muted-foreground">Aggregate stats · win rate</div>
                       </div>
-                      <Toggle enabled={r.enabled} onChange={() => walletStore.toggleReveal(r.address)} />
-                      <button className="grid h-9 w-9 place-items-center rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition">
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground shrink-0">
+                        Auto-refresh
+                        <Toggle enabled={r.enabled} onChange={() => walletStore.toggleReveal(r.address)} />
+                      </label>
+                      <button
+                        onClick={() => walletStore.removeReveal(r.address)}
+                        className="grid h-9 w-9 place-items-center rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition"
+                      >
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </li>

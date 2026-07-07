@@ -1,4 +1,7 @@
 import { useSyncExternalStore } from "react";
+import { Contract, type Signer } from "ethers";
+import { CONTRACT_ADDRESS, JOURNAL_ABI } from "./contract";
+import { connectWallet, encryptTrade, userDecryptHandles } from "./fhevm";
 
 type Notification = {
   id: string;
@@ -7,29 +10,115 @@ type Notification = {
   ts: number;
 };
 
+export type Entry = {
+  index: number;
+  ts: number; // real on-chain timestamp (seconds)
+  pnlHandle: string;
+  isWinHandle: string;
+  // Labels/assets aren't stored on-chain (the contract only stores
+  // magnitude + win/loss + timestamp), so this metadata lives in
+  // localStorage, scoped to the connected address.
+  label: string;
+  asset: string;
+  decryptedPnl?: bigint;
+  decryptedIsWin?: boolean;
+};
+
+export type AggregatesState = {
+  totalGainsHandle?: string;
+  totalLossesHandle?: string;
+  winCountHandle?: string;
+  lossCountHandle?: string;
+  gains?: bigint;
+  losses?: bigint;
+  winCount?: bigint;
+  lossCount?: bigint;
+};
+
+export type Reveal = {
+  address: string;
+  enabled: boolean; // whether we keep refreshing their access on new trades
+  grantedAt: number;
+};
+
 type State = {
   address: string | null;
-  entries: { id: string; label: string; encrypted: string; ts: number; kind: "gain" | "loss" }[];
-  reveals: { address: string; enabled: boolean }[];
+  signer: Signer | null;
+  connecting: boolean;
+  connectError: string | null;
+
+  entries: Entry[];
+  loadingEntries: boolean;
+  decryptingEntries: boolean;
+
+  aggregates: AggregatesState;
+  decryptingAggregates: boolean;
+
+  reveals: Reveal[];
+
   notifications: Notification[];
 };
 
-let state: State = {
+const initialState: State = {
   address: null,
-  entries: [
-    { id: "e1", label: "ETH swing (Q3)", encrypted: "0x8f…c21a", ts: Date.now() - 86400000 * 3, kind: "gain" },
-    { id: "e2", label: "Perp short SOL", encrypted: "0x14…9ab2", ts: Date.now() - 86400000 * 5, kind: "loss" },
-    { id: "e3", label: "Basis trade BTC", encrypted: "0xa2…7f01", ts: Date.now() - 86400000 * 8, kind: "gain" },
-  ],
+  signer: null,
+  connecting: false,
+  connectError: null,
+  entries: [],
+  loadingEntries: false,
+  decryptingEntries: false,
+  aggregates: {},
+  decryptingAggregates: false,
   reveals: [],
-  notifications: [
-    { id: "n1", title: "Transaction confirmed on Sepolia", detail: "0xa2…7f01", ts: Date.now() - 1000 * 60 * 12 },
-    { id: "n2", title: "Encrypted entry submitted", detail: "Basis trade BTC", ts: Date.now() - 1000 * 60 * 60 * 2 },
-  ],
+  notifications: [],
 };
 
+let state: State = { ...initialState };
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
+function setState(patch: Partial<State>) {
+  state = { ...state, ...patch };
+  emit();
+}
+function pushNotification(title: string, detail?: string) {
+  setState({
+    notifications: [{ id: crypto.randomUUID(), title, detail, ts: Date.now() }, ...state.notifications],
+  });
+}
+
+// --- localStorage-backed metadata (labels/assets/reveal grants aren't on-chain) ---
+
+function metaKey(address: string) {
+  return `journal:meta:${address.toLowerCase()}`;
+}
+function revealsKey(address: string) {
+  return `journal:reveals:${address.toLowerCase()}`;
+}
+
+function readMeta(address: string): Record<number, { label: string; asset: string }> {
+  try {
+    return JSON.parse(localStorage.getItem(metaKey(address)) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+function writeMeta(address: string, meta: Record<number, { label: string; asset: string }>) {
+  localStorage.setItem(metaKey(address), JSON.stringify(meta));
+}
+function readReveals(address: string): Reveal[] {
+  try {
+    return JSON.parse(localStorage.getItem(revealsKey(address)) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+function writeReveals(address: string, reveals: Reveal[]) {
+  localStorage.setItem(revealsKey(address), JSON.stringify(reveals));
+}
+
+function getContract(runner: Signer) {
+  return new Contract(CONTRACT_ADDRESS, JOURNAL_ABI, runner);
+}
 
 export const walletStore = {
   getState: () => state,
@@ -37,58 +126,216 @@ export const walletStore = {
     listeners.add(l);
     return () => listeners.delete(l);
   },
-  connect: () => {
-    const rand = Math.random().toString(16).slice(2, 6);
-    state = {
-      ...state,
-      address: `0x1a2f${rand}${Math.random().toString(16).slice(2, 6)}9f3`,
-      notifications: [
-        { id: crypto.randomUUID(), title: "Wallet connected", detail: "Sepolia network", ts: Date.now() },
-        ...state.notifications,
-      ],
-    };
-    emit();
+
+  async connect() {
+    setState({ connecting: true, connectError: null });
+    try {
+      const { signer, address } = await connectWallet();
+      setState({ signer, address, reveals: readReveals(address) });
+      pushNotification("Wallet connected", "Sepolia network");
+      await Promise.all([walletStore.refreshEntries(), walletStore.refreshAggregates()]);
+    } catch (err: any) {
+      setState({ connectError: err?.message ?? "Failed to connect wallet" });
+    } finally {
+      setState({ connecting: false });
+    }
   },
-  disconnect: () => {
-    state = { ...state, address: null };
-    emit();
+
+  disconnect() {
+    // Dapps can't force-disconnect an injected wallet session; this only
+    // clears local app state. Fully disconnecting happens from MetaMask itself.
+    setState({ ...initialState, notifications: state.notifications });
   },
-  addEntry: (label: string, amount: number) => {
-    const kind = amount >= 0 ? "gain" : "loss";
-    state = {
-      ...state,
-      entries: [
-        { id: crypto.randomUUID(), label, encrypted: `0x${Math.random().toString(16).slice(2, 6)}…${Math.random().toString(16).slice(2, 6)}`, ts: Date.now(), kind },
-        ...state.entries,
-      ],
-      notifications: [
-        { id: crypto.randomUUID(), title: "Encrypted entry submitted", detail: label, ts: Date.now() },
-        ...state.notifications,
-      ],
-    };
-    emit();
+
+  async refreshEntries() {
+    const { signer, address } = state;
+    if (!signer || !address) return;
+    setState({ loadingEntries: true });
+    try {
+      const contract = getContract(signer);
+      const count: bigint = await contract.getTradeCount(address);
+      const meta = readMeta(address);
+      const prevByIndex = new Map(state.entries.map((e) => [e.index, e]));
+      const loaded: Entry[] = [];
+      for (let i = 0; i < Number(count); i++) {
+        const [pnlHandle, isWinHandle, ts] = await contract.getTrade(address, i);
+        const prev = prevByIndex.get(i);
+        loaded.push({
+          index: i,
+          ts: Number(ts),
+          pnlHandle,
+          isWinHandle,
+          label: meta[i]?.label ?? `Trade #${i + 1}`,
+          asset: meta[i]?.asset ?? "—",
+          decryptedPnl: prev?.decryptedPnl,
+          decryptedIsWin: prev?.decryptedIsWin,
+        });
+      }
+      setState({ entries: loaded.reverse() });
+    } finally {
+      setState({ loadingEntries: false });
+    }
   },
-  grantReveal: (addr: string) => {
-    state = {
-      ...state,
-      reveals: [{ address: addr, enabled: true }, ...state.reveals.filter((r) => r.address !== addr)],
-      notifications: [
-        { id: crypto.randomUUID(), title: "Reveal granted", detail: addr, ts: Date.now() },
-        ...state.notifications,
-      ],
-    };
-    emit();
+
+  async refreshAggregates() {
+    const { signer, address } = state;
+    if (!signer || !address) return;
+    const contract = getContract(signer);
+    const [totalGainsHandle, totalLossesHandle, winCountHandle, lossCountHandle] = await contract.getAggregates(
+      address,
+    );
+    setState({
+      aggregates: { ...state.aggregates, totalGainsHandle, totalLossesHandle, winCountHandle, lossCountHandle },
+    });
   },
-  toggleReveal: (addr: string) => {
-    state = {
-      ...state,
-      reveals: state.reveals.map((r) => (r.address === addr ? { ...r, enabled: !r.enabled } : r)),
-    };
-    emit();
+
+  /** Encrypts + submits a trade, then re-grants any tracked verifiers so their
+   *  access follows the fresh aggregate ciphertext handles (each FHE.add
+   *  produces a new handle — see submitTrade in the contract — so a verifier's
+   *  earlier grant would otherwise go stale the moment a new trade is logged). */
+  async addEntry(label: string, asset: string, amount: number) {
+    const { signer, address } = state;
+    if (!signer || !address) return;
+    const magnitude = BigInt(Math.abs(Math.trunc(amount)));
+    const isWin = amount >= 0;
+    if (magnitude === 0n) {
+      pushNotification("Enter a non-zero P&L", "Amount must not be zero");
+      return;
+    }
+    try {
+      pushNotification("Encrypting trade client-side…", label);
+      const { encPnlMagnitude, encIsWin, inputProof } = await encryptTrade(CONTRACT_ADDRESS, address, magnitude, isWin);
+      const contract = getContract(signer);
+      const tx = await contract.submitTrade(encPnlMagnitude, encIsWin, inputProof);
+      await tx.wait();
+
+      const meta = readMeta(address);
+      const nextIndex = state.entries.length ? Math.max(...state.entries.map((e) => e.index)) + 1 : 0;
+      meta[nextIndex] = { label, asset };
+      writeMeta(address, meta);
+
+      pushNotification("Encrypted entry submitted", `${label} · tx ${tx.hash.slice(0, 10)}…`);
+      await walletStore.refreshEntries();
+      await walletStore.refreshAggregates();
+      await walletStore.reGrantTrackedReveals();
+    } catch (err: any) {
+      pushNotification("Trade submission failed", err?.shortMessage ?? err?.message ?? "Unknown error");
+    }
   },
-  clearNotifications: () => {
-    state = { ...state, notifications: [] };
-    emit();
+
+  async decryptEntries() {
+    const { signer, entries } = state;
+    if (!signer || entries.length === 0) return;
+    setState({ decryptingEntries: true });
+    try {
+      const labeled: Record<string, string> = {};
+      entries.forEach((e) => {
+        labeled[`pnl:${e.index}`] = e.pnlHandle;
+        labeled[`win:${e.index}`] = e.isWinHandle;
+      });
+      const result = await userDecryptHandles(CONTRACT_ADDRESS, signer, labeled);
+      setState({
+        entries: state.entries.map((e) => ({
+          ...e,
+          decryptedPnl: result[`pnl:${e.index}`],
+          decryptedIsWin: Boolean(result[`win:${e.index}`]),
+        })),
+      });
+    } catch (err: any) {
+      pushNotification("Decryption failed", err?.message ?? "Unknown error");
+    } finally {
+      setState({ decryptingEntries: false });
+    }
+  },
+
+  async decryptAggregates() {
+    const { signer, aggregates } = state;
+    if (!signer || !aggregates.totalGainsHandle) return;
+    setState({ decryptingAggregates: true });
+    try {
+      const result = await userDecryptHandles(CONTRACT_ADDRESS, signer, {
+        gains: aggregates.totalGainsHandle,
+        losses: aggregates.totalLossesHandle!,
+        winCount: aggregates.winCountHandle!,
+        lossCount: aggregates.lossCountHandle!,
+      });
+      setState({
+        aggregates: {
+          ...aggregates,
+          gains: result.gains,
+          losses: result.losses,
+          winCount: result.winCount,
+          lossCount: result.lossCount,
+        },
+      });
+    } catch (err: any) {
+      pushNotification("Decryption failed", err?.message ?? "Unknown error");
+    } finally {
+      setState({ decryptingAggregates: false });
+    }
+  },
+
+  async grantReveal(addr: string) {
+    const { signer, address } = state;
+    if (!signer || !address) return;
+    try {
+      const contract = getContract(signer);
+      const tx = await contract.grantVerifierAccess(addr);
+      await tx.wait();
+      const reveals = [
+        { address: addr, enabled: true, grantedAt: Date.now() },
+        ...state.reveals.filter((r) => r.address.toLowerCase() !== addr.toLowerCase()),
+      ];
+      setState({ reveals });
+      writeReveals(address, reveals);
+      pushNotification("Reveal granted", `${addr.slice(0, 10)}… · tx ${tx.hash.slice(0, 10)}…`);
+    } catch (err: any) {
+      pushNotification("Grant failed", err?.shortMessage ?? err?.message ?? "Unknown error");
+    }
+  },
+
+  /** Soft "revoke": fhEVM ACL grants can't be un-granted once made, so this
+   *  only stops this verifier from being auto-refreshed on your next trade.
+   *  Their access to the *current* aggregates remains valid until then. */
+  toggleReveal(addr: string) {
+    const { address } = state;
+    if (!address) return;
+    const reveals = state.reveals.map((r) => (r.address === addr ? { ...r, enabled: !r.enabled } : r));
+    setState({ reveals });
+    writeReveals(address, reveals);
+  },
+
+  removeReveal(addr: string) {
+    const { address } = state;
+    if (!address) return;
+    const reveals = state.reveals.filter((r) => r.address !== addr);
+    setState({ reveals });
+    writeReveals(address, reveals);
+    pushNotification(
+      "Verifier removed from auto-refresh",
+      "Their access to already-granted aggregates lapses after your next trade.",
+    );
+  },
+
+  async reGrantTrackedReveals() {
+    const { signer, address, reveals } = state;
+    if (!signer || !address) return;
+    const contract = getContract(signer);
+    for (const r of reveals.filter((r) => r.enabled)) {
+      try {
+        const tx = await contract.grantVerifierAccess(r.address);
+        await tx.wait();
+      } catch (err: any) {
+        pushNotification(
+          "Verifier re-grant failed",
+          `${r.address.slice(0, 10)}… — ${err?.shortMessage ?? err?.message ?? "unknown error"}`,
+        );
+      }
+    }
+  },
+
+  clearNotifications() {
+    setState({ notifications: [] });
   },
 };
 

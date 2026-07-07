@@ -4,7 +4,7 @@ import { Bell, ChevronDown, LogOut, Menu, Shield, X } from "lucide-react";
 import { truncate, useWallet, walletStore, timeAgo } from "@/lib/wallet-store";
 
 export function TopNav() {
-  const { address, notifications } = useWallet();
+  const { address, notifications, connecting, connectError } = useWallet();
   const [notifOpen, setNotifOpen] = useState(false);
   const [walletMenu, setWalletMenu] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -114,12 +114,16 @@ export function TopNav() {
               )}
             </div>
           ) : (
-            <button
-              onClick={() => walletStore.connect()}
-              className="hidden sm:inline-flex items-center gap-2 rounded-full bg-primary text-black px-4 py-2.5 text-sm font-semibold hover:brightness-95 transition shadow-glow"
-            >
-              Connect Wallet
-            </button>
+            <div className="hidden sm:flex flex-col items-end gap-1">
+              <button
+                onClick={() => walletStore.connect()}
+                disabled={connecting}
+                className="inline-flex items-center gap-2 rounded-full bg-primary text-black px-4 py-2.5 text-sm font-semibold hover:brightness-95 transition shadow-glow disabled:opacity-60"
+              >
+                {connecting ? "Connecting…" : "Connect Wallet"}
+              </button>
+              {connectError && <span className="text-[11px] text-destructive max-w-[220px] text-right">{connectError}</span>}
+            </div>
           )}
 
           <button onClick={() => setMobileOpen(true)} className="md:hidden grid h-10 w-10 place-items-center rounded-full bg-surface">

@@ -1,8 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { ArrowUpRight, Lock, Plus, TrendingUp, TrendingDown, Percent, X } from "lucide-react";
+import { ArrowUpRight, Lock, Plus, TrendingUp, TrendingDown, Percent, X, Unlock } from "lucide-react";
 import { TopNav } from "@/components/top-nav";
-import { timeAgo, useWallet, walletStore } from "@/lib/wallet-store";
+import { timeAgo, useWallet, walletStore, type Entry } from "@/lib/wallet-store";
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
@@ -15,7 +15,8 @@ export const Route = createFileRoute("/dashboard")({
 });
 
 function Dashboard() {
-  const { address, entries } = useWallet();
+  const { address, entries, loadingEntries, decryptingEntries, aggregates, decryptingAggregates, connecting } =
+    useWallet();
   const [open, setOpen] = useState(false);
 
   if (!address) {
@@ -28,17 +29,23 @@ function Dashboard() {
           </div>
           <h1 className="text-3xl font-bold tracking-tight">Connect to view your journal</h1>
           <p className="text-muted-foreground mt-3">Your encrypted stats stay on-chain, decryptable only by you.</p>
-          <button onClick={() => walletStore.connect()} className="mt-8 inline-flex rounded-full bg-primary text-black px-6 py-3.5 text-sm font-semibold shadow-glow">
-            Connect Wallet
+          <button
+            onClick={() => walletStore.connect()}
+            disabled={connecting}
+            className="mt-8 inline-flex rounded-full bg-primary text-black px-6 py-3.5 text-sm font-semibold shadow-glow disabled:opacity-60"
+          >
+            {connecting ? "Connecting…" : "Connect Wallet"}
           </button>
         </div>
       </div>
     );
   }
 
-  const gains = entries.filter((e) => e.kind === "gain").length;
-  const losses = entries.filter((e) => e.kind === "loss").length;
-  const winRate = entries.length === 0 ? 0 : Math.round((gains / entries.length) * 100);
+  const statsDecrypted = aggregates.gains !== undefined;
+  const winRate =
+    statsDecrypted && aggregates.winCount! + aggregates.lossCount! > 0n
+      ? Math.round((Number(aggregates.winCount) / Number(aggregates.winCount! + aggregates.lossCount!)) * 100)
+      : null;
 
   return (
     <div className="min-h-screen bg-background">
@@ -48,17 +55,40 @@ function Dashboard() {
           <div>
             <div className="label-caps text-muted-foreground mb-2">Journal</div>
             <h1 className="text-3xl sm:text-4xl font-bold tracking-[-0.02em]">Encrypted overview</h1>
-            <p className="text-sm text-muted-foreground mt-2">Aggregate stats are computed over ciphertext. Only ciphertext hashes are visible.</p>
+            <p className="text-sm text-muted-foreground mt-2">Aggregate stats are computed over ciphertext on Sepolia. Decrypt them to reveal the real numbers.</p>
           </div>
-          <button onClick={() => setOpen(true)} className="inline-flex items-center gap-2 rounded-full bg-primary text-black px-5 py-3 text-sm font-semibold shadow-glow hover:brightness-95 transition">
-            <Plus className="h-4 w-4" /> New P&L Entry
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => walletStore.decryptAggregates()}
+              disabled={decryptingAggregates}
+              className="inline-flex items-center gap-2 rounded-full bg-surface px-5 py-3 text-sm font-semibold hover:bg-border/60 transition disabled:opacity-60"
+            >
+              <Unlock className="h-4 w-4" /> {decryptingAggregates ? "Decrypting…" : "Decrypt Stats"}
+            </button>
+            <button
+              onClick={() => setOpen(true)}
+              className="inline-flex items-center gap-2 rounded-full bg-primary text-black px-5 py-3 text-sm font-semibold shadow-glow hover:brightness-95 transition"
+            >
+              <Plus className="h-4 w-4" /> New P&L Entry
+            </button>
+          </div>
         </div>
 
         <div className="grid gap-4 sm:grid-cols-3">
-          <StatCard label="Total Gains" value={`${gains}`} accent icon={TrendingUp} sub="verified entries" />
-          <StatCard label="Total Losses" value={`${losses}`} icon={TrendingDown} sub="verified entries" />
-          <StatCard label="Win Rate" value={`${winRate}%`} icon={Percent} sub="over lifetime" />
+          <StatCard
+            label="Total Gains"
+            value={statsDecrypted ? aggregates.gains!.toString() : "••••"}
+            accent
+            icon={TrendingUp}
+            sub="lifetime, decrypted"
+          />
+          <StatCard
+            label="Total Losses"
+            value={statsDecrypted ? aggregates.losses!.toString() : "••••"}
+            icon={TrendingDown}
+            sub="lifetime, decrypted"
+          />
+          <StatCard label="Win Rate" value={winRate !== null ? `${winRate}%` : "••%"} icon={Percent} sub="over lifetime" />
         </div>
 
         <section className="mt-10 grid gap-6 lg:grid-cols-3">
@@ -68,20 +98,28 @@ function Dashboard() {
                 <div className="text-sm font-semibold">Encrypted entries</div>
                 <div className="text-xs text-muted-foreground">Ciphertext handles · Sepolia</div>
               </div>
-              <Link to="/reveal" className="text-xs font-medium inline-flex items-center gap-1 hover:underline">Manage reveals <ArrowUpRight className="h-3.5 w-3.5" /></Link>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => walletStore.decryptEntries()}
+                  disabled={decryptingEntries || entries.length === 0}
+                  className="text-xs font-medium inline-flex items-center gap-1 hover:underline disabled:opacity-50"
+                >
+                  {decryptingEntries ? "Decrypting…" : "Decrypt ledger"}
+                </button>
+                <Link to="/reveal" className="text-xs font-medium inline-flex items-center gap-1 hover:underline">
+                  Manage reveals <ArrowUpRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
             </div>
             <ul className="divide-y divide-border/60">
+              {loadingEntries && entries.length === 0 && (
+                <li className="px-6 py-10 text-center text-sm text-muted-foreground">Loading your ledger from Sepolia…</li>
+              )}
+              {!loadingEntries && entries.length === 0 && (
+                <li className="px-6 py-10 text-center text-sm text-muted-foreground">No trades logged yet.</li>
+              )}
               {entries.map((e) => (
-                <li key={e.id} className="flex items-center gap-4 px-6 py-4 hover:bg-surface/70 transition">
-                  <div className={`grid h-10 w-10 place-items-center rounded-2xl ${e.kind === "gain" ? "bg-primary/25" : "bg-surface"}`}>
-                    {e.kind === "gain" ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium truncate">{e.label}</div>
-                    <div className="text-xs text-muted-foreground tabular-nums">{e.encrypted} · {timeAgo(e.ts)}</div>
-                  </div>
-                  <span className="hidden sm:inline-flex text-[11px] rounded-full bg-surface px-2.5 py-1 label-caps text-muted-foreground">Encrypted</span>
-                </li>
+                <EntryRow key={e.index} entry={e} />
               ))}
             </ul>
           </div>
@@ -100,6 +138,39 @@ function Dashboard() {
 
       {open && <EntryModal onClose={() => setOpen(false)} />}
     </div>
+  );
+}
+
+function EntryRow({ entry }: { entry: Entry }) {
+  const revealed = entry.decryptedPnl !== undefined;
+  const isWin = entry.decryptedIsWin;
+  return (
+    <li className="flex items-center gap-4 px-6 py-4 hover:bg-surface/70 transition">
+      <div
+        className={`grid h-10 w-10 place-items-center rounded-2xl ${
+          revealed ? (isWin ? "bg-primary/25" : "bg-surface") : "bg-surface"
+        }`}
+      >
+        {!revealed ? (
+          <Lock className="h-4 w-4" />
+        ) : isWin ? (
+          <TrendingUp className="h-4 w-4" />
+        ) : (
+          <TrendingDown className="h-4 w-4" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium truncate">
+          {entry.label} <span className="text-muted-foreground font-normal">· {entry.asset}</span>
+        </div>
+        <div className="text-xs text-muted-foreground tabular-nums">
+          {revealed ? `${isWin ? "+" : "-"}${entry.decryptedPnl}` : `${entry.pnlHandle.slice(0, 10)}…`} · {timeAgo(entry.ts * 1000)}
+        </div>
+      </div>
+      <span className="hidden sm:inline-flex text-[11px] rounded-full bg-surface px-2.5 py-1 label-caps text-muted-foreground">
+        {revealed ? "Decrypted" : "Encrypted"}
+      </span>
+    </li>
   );
 }
 
@@ -122,12 +193,18 @@ function EntryModal({ onClose }: { onClose: () => void }) {
   const [label, setLabel] = useState("");
   const [amount, setAmount] = useState("");
   const [asset, setAsset] = useState("ETH");
+  const [submitting, setSubmitting] = useState(false);
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!label) return;
-    walletStore.addEntry(label, Number(amount) || 0);
-    onClose();
+    if (!label || submitting) return;
+    setSubmitting(true);
+    try {
+      await walletStore.addEntry(label, asset, Number(amount) || 0);
+      onClose();
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -151,18 +228,20 @@ function EntryModal({ onClose }: { onClose: () => void }) {
                 <option>ETH</option><option>BTC</option><option>SOL</option><option>Other</option>
               </select>
             </Field>
-            <Field label="P&L (USD)">
-              <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" placeholder="1250" className="w-full rounded-2xl bg-surface px-4 py-3.5 text-sm outline-none focus:ring-2 focus:ring-primary tabular-nums" />
+            <Field label="P&L (positive = win, negative = loss)">
+              <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" placeholder="150 or -40" className="w-full rounded-2xl bg-surface px-4 py-3.5 text-sm outline-none focus:ring-2 focus:ring-primary tabular-nums" />
             </Field>
           </div>
           <div className="flex items-center gap-2 rounded-2xl bg-primary/15 px-4 py-3 text-xs">
             <Lock className="h-3.5 w-3.5 shrink-0" />
-            Values are encrypted with FHE before being posted to Sepolia.
+            Values are encrypted with FHE before being posted to Sepolia. Only the trade's label/asset are stored locally in your browser — the chain never sees them.
           </div>
         </div>
         <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-border/60 bg-surface/50 rounded-b-3xl">
           <button type="button" onClick={onClose} className="rounded-full px-4 py-2.5 text-sm font-medium hover:bg-background">Cancel</button>
-          <button type="submit" className="rounded-full bg-primary text-black px-5 py-2.5 text-sm font-semibold hover:brightness-95">Encrypt & submit</button>
+          <button type="submit" disabled={submitting} className="rounded-full bg-primary text-black px-5 py-2.5 text-sm font-semibold hover:brightness-95 disabled:opacity-60">
+            {submitting ? "Encrypting & submitting…" : "Encrypt & submit"}
+          </button>
         </div>
       </form>
     </div>
