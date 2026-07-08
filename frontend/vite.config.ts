@@ -17,6 +17,11 @@ export default defineConfig({
   // Needed for @zama-fhe/relayer-sdk, which ships its FHE engine as a WASM module.
   vite: {
     plugins: [wasm(), topLevelAwait()],
+    // vite-plugin-top-level-await's esbuild transform can't downlevel destructuring
+    // for the default (older-browser) target list; esnext skips that transform.
+    build: {
+      target: "esnext",
+    },
     optimizeDeps: {
       exclude: ["@zama-fhe/relayer-sdk"],
     },
