@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { Contract, type Signer } from "ethers";
+import type { Signer } from "ethers";
 import { CONTRACT_ADDRESS, JOURNAL_ABI } from "./contract";
 import { connectWallet, encryptTrade, userDecryptHandles } from "./fhevm";
 
@@ -129,7 +129,15 @@ function writeReveals(address: string, reveals: Reveal[]) {
   localStorage.setItem(revealsKey(address), JSON.stringify(reveals));
 }
 
-function getContract(runner: Signer) {
+// Dynamically imported (not a static top-level import) so this file carries
+// no build-time reference to ethers. Every route statically imports this
+// module via TopNav, and Rollup was otherwise merging ethers' Contract export
+// into the same physical chunk as the whole @zama-fhe/relayer-sdk package
+// (they share ethers as a dependency) — which made the relayer SDK's
+// browser-only top-level code load eagerly during SSR and crash with
+// "self is not defined" on the server, where there's no browser `self`.
+async function getContract(runner: Signer) {
+  const { Contract } = await import("ethers");
   return new Contract(CONTRACT_ADDRESS, JOURNAL_ABI, runner);
 }
 
@@ -233,7 +241,7 @@ export const walletStore = {
     if (!signer || !address) return;
     setState({ loadingEntries: true });
     try {
-      const contract = getContract(signer);
+      const contract = await getContract(signer);
       const count: bigint = await contract.getTradeCount(address);
       const meta = readMeta(address);
       const prevByIndex = new Map(state.entries.map((e) => [e.index, e]));
@@ -261,7 +269,7 @@ export const walletStore = {
   async refreshAggregates() {
     const { signer, address } = state;
     if (!signer || !address) return;
-    const contract = getContract(signer);
+    const contract = await getContract(signer);
     const [totalGainsHandle, totalLossesHandle, winCountHandle, lossCountHandle] = await contract.getAggregates(
       address,
     );
@@ -285,7 +293,7 @@ export const walletStore = {
     }
     try {
       const { encPnlMagnitude, encIsWin, inputProof } = await encryptTrade(CONTRACT_ADDRESS, address, magnitude, isWin);
-      const contract = getContract(signer);
+      const contract = await getContract(signer);
       const tx = await contract.submitTrade(encPnlMagnitude, encIsWin, inputProof);
       await tx.wait();
 
@@ -365,7 +373,7 @@ export const walletStore = {
     const { signer, address } = state;
     if (!signer || !address) return;
     try {
-      const contract = getContract(signer);
+      const contract = await getContract(signer);
       const tx = await contract.grantVerifierAccess(addr);
       await tx.wait();
       const reveals = [
@@ -413,7 +421,7 @@ export const walletStore = {
   async reGrantTrackedReveals() {
     const { signer, address, reveals } = state;
     if (!signer || !address) return;
-    const contract = getContract(signer);
+    const contract = await getContract(signer);
     for (const r of reveals.filter((r) => r.enabled)) {
       try {
         const tx = await contract.grantVerifierAccess(r.address);
@@ -437,7 +445,7 @@ export const walletStore = {
     if (!signer) return;
     setState({ lookup: { status: "loading" } });
     try {
-      const contract = getContract(signer);
+      const contract = await getContract(signer);
       const [totalGainsHandle, totalLossesHandle, winCountHandle, lossCountHandle] = await contract.getAggregates(
         traderAddress,
       );
